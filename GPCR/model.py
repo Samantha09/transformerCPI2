@@ -16,6 +16,9 @@ from sklearn.metrics import roc_auc_score, precision_score, recall_score,precisi
 from Radam import *
 from lookahead import Lookahead
 
+from utils import tqdm
+from copy import deepcopy
+
 
 class SelfAttention(nn.Module):
     def __init__(self, hid_dim, n_heads, dropout, device):
@@ -397,15 +400,22 @@ class Trainer(object):
 
     def train(self, dataset, device):
         self.model.train()
-        np.random.shuffle(dataset)
-        N = len(dataset)
+        # dataset_iter = iter(dataset)
+        # np.random.shuffle(dataset)
+        N = sum(1 for _ in deepcopy(dataset))
+        # print("len of datasets: ", N)
         loss_total = 0
         i = 0
         self.optimizer.zero_grad()
         adjs, atoms, proteins, labels = [], [], [], []
-        for data in dataset:
+        # TODO: 进度条
+        for _ in tqdm(range(N), ascii=True):
+            data = next(dataset)
             i = i+1
             atom, adj, protein, label = data
+            # TODO: 将Tensor转移到显卡上
+            if torch.cuda.is_available():
+                atom, adj, protein, label = atom.cuda(), adj.cuda(), protein.cuda(), label.cuda()
             adjs.append(adj)
             atoms.append(atom)
             proteins.append(protein)
@@ -423,7 +433,10 @@ class Trainer(object):
                 self.optimizer.step()
                 self.optimizer.zero_grad()
             loss_total += loss.item()
+
         return loss_total
+
+
 
 
 class Tester(object):
@@ -432,17 +445,23 @@ class Tester(object):
 
     def test(self, dataset):
         self.model.eval()
-        N = len(dataset)
+        N = sum(1 for _ in deepcopy(dataset))
+        # print("len of test: ", N)
         T, Y, S = [], [], []
         with torch.no_grad():
-            for data in dataset:
+            # TODO: 进度条
+            for _ in tqdm(range(N), ascii=True):
+                data = next(dataset)
                 adjs, atoms, proteins, labels = [], [], [], []
                 atom, adj, protein, label = data
+                # TODO: 将Tensor转移到显卡上
+                if torch.cuda.is_available():
+                    atom, adj, protein, label = atom.cuda(), adj.cuda(), protein.cuda(), label.cuda()
                 adjs.append(adj)
                 atoms.append(atom)
                 proteins.append(protein)
                 labels.append(label)
-                data = pack(atoms,adjs,proteins, labels, self.model.device)
+                data = pack(atoms, adjs, proteins, labels, self.model.device)
                 correct_labels, predicted_labels, predicted_scores = self.model(data, train=False)
                 T.extend(correct_labels)
                 Y.extend(predicted_labels)

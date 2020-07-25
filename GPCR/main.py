@@ -6,16 +6,18 @@
 @Software: PyCharm
 """
 import torch
+import sys
 import numpy as np
 import random
 import os
 import time
 from model import *
 import timeit
+from copy import deepcopy
 
 
 def load_tensor(file_name, dtype):
-    return [dtype(d).to(device) for d in np.load(file_name + '.npy')]
+    return [dtype(d) for d in np.load(file_name + '.npy', allow_pickle=True)]
 
 
 def shuffle_dataset(dataset, seed):
@@ -27,10 +29,20 @@ def shuffle_dataset(dataset, seed):
 def split_dataset(dataset, ratio):
     n = int(ratio * len(dataset))
     dataset_1, dataset_2 = dataset[:n], dataset[n:]
-    return dataset_1, dataset_2
+    # TODO 返回迭代器
+    return iter(dataset_1), iter(dataset_2)
 
 
 if __name__ == "__main__":
+
+    # TODO 使用os模块获取路径，方便迁移
+    # 获取上级路径
+    BASE_DIR = os.path.abspath(os.path.join(os.getcwd(), ".."))
+
+    cuda = torch.cuda.is_available()
+    # 显卡id
+    devices_ids = [0]
+
     SEED = 1
     random.seed(SEED)
     torch.manual_seed(SEED)
@@ -45,16 +57,19 @@ if __name__ == "__main__":
         print('The code uses CPU!!!')
 
     """Load preprocessed data."""
-    dir_input = ('dataset/' + DATASET + '/word2vec_30/')
-    compounds = load_tensor(dir_input + 'compounds', torch.FloatTensor)
-    adjacencies = load_tensor(dir_input + 'adjacencies', torch.FloatTensor)
-    proteins = load_tensor(dir_input + 'proteins', torch.FloatTensor)
-    interactions = load_tensor(dir_input + 'interactions', torch.LongTensor)
+    dir_input = (os.path.join(BASE_DIR, 'GPCR/dataset', DATASET, 'word2vec_30'))
+    compounds = load_tensor(os.path.join(dir_input, 'compounds'), torch.FloatTensor)
+    adjacencies = load_tensor(os.path.join(dir_input, 'adjacencies'), torch.FloatTensor)
+    proteins = load_tensor(os.path.join(dir_input, 'proteins'), torch.FloatTensor)
+    interactions = load_tensor(os.path.join(dir_input, 'interactions'), torch.LongTensor)
 
     """Create a dataset and split it into train/dev/test."""
-    dataset = list(zip(compounds, adjacencies, proteins, interactions))
-    dataset = shuffle_dataset(dataset, 1234)
-    dataset_train, dataset_dev = split_dataset(dataset, 0.8)
+    # TODO: 这里占用内存过大，应使用临时变量保存大列表，使用迭代器获取数据，由gc自动回收
+    # dataset = list(zip(compounds, adjacencies, proteins, interactions))
+    # dataset = iter(list(zip(compounds, adjacencies, proteins, interactions)))
+    # dataset = shuffle_dataset(list(zip(compounds, adjacencies, proteins, interactions)), 1234)
+    dataset_train, dataset_dev = split_dataset(
+        shuffle_dataset(list(zip(compounds, adjacencies, proteins, interactions)), 1234), 0.8)
 
     """ create model ,trainer and tester """
     protein_dim = 100
@@ -64,7 +79,7 @@ if __name__ == "__main__":
     n_heads = 8
     pf_dim = 256
     dropout = 0.1
-    batch = 64
+    batch = 1
     lr = 1e-4
     weight_decay = 1e-4
     decay_interval = 5
@@ -76,13 +91,18 @@ if __name__ == "__main__":
     decoder = Decoder(atom_dim, hid_dim, n_layers, n_heads, pf_dim, DecoderLayer, SelfAttention, PositionwiseFeedforward, dropout, device)
     model = Predictor(encoder, decoder, device)
     # model.load_state_dict(torch.load("output/model/lr=0.001,dropout=0.1,lr_decay=0.5"))
-    model.to(device)
+
+    # TODO: gpu支持
+    if cuda:
+        model.cuda(devices_ids[0])
+        # 开启并行模式
+        # model = torch.nn.DataParallel(model, device_ids=devices_ids)
     trainer = Trainer(model, lr, weight_decay, batch)
     tester = Tester(model)
 
     """Output files."""
-    file_AUCs = 'output/result/AUCs--lr=1e-4,dropout=0.1,weight_decay=1e-4,kernel=7,n_layer=3,batch=64'+ '.txt'
-    file_model = 'output/model/' + 'lr=1e-4,dropout=0.1,weight_decay=1e-4,kernel=7,n_layer=3,batch=64'
+    file_AUCs = os.path.join(BASE_DIR, 'output/result/AUCs--lr=1e-4,dropout=0.1,weight_decay=1e-4,kernel=7,n_layer=3,batch=64.txt')
+    file_model = os.path.join(BASE_DIR, 'output/model', 'lr=1e-4,dropout=0.1,weight_decay=1e-4,kernel=7,n_layer=3,batch=64')
     AUCs = ('Epoch\tTime(sec)\tLoss_train\tAUC_dev\tPRC_dev')
     with open(file_AUCs, 'w') as f:
         f.write(AUCs + '\n')
@@ -93,17 +113,21 @@ if __name__ == "__main__":
     start = timeit.default_timer()
 
     max_AUC_dev = 0
+
     for epoch in range(1, iteration+1):
         if epoch % decay_interval == 0:
             trainer.optimizer.param_groups[0]['lr'] *= lr_decay
 
-        loss_train = trainer.train(dataset_train, device)
-        AUC_dev, PRC_dev = tester.test(dataset_dev)
+        # TODO： 使用迭代器
+        dataset_t = deepcopy(dataset_train)
+        loss_train = trainer.train(dataset_t, device)
+        dataset_d = deepcopy(dataset_dev)
+        AUC_dev, PRC_dev = tester.test(dataset_d)
 
         end = timeit.default_timer()
         time = end - start
 
-        AUCs = [epoch, time, loss_train, AUC_dev,PRC_dev]
+        AUCs = [epoch, time, loss_train, AUC_dev, PRC_dev]
         tester.save_AUCs(AUCs, file_AUCs)
         if AUC_dev > max_AUC_dev:
             tester.save_model(model, file_model)
